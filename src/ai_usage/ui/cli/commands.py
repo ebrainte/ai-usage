@@ -230,6 +230,9 @@ def accounts_login(
         False, "--device-flow", "-d", help="Use GitHub device flow (Copilot)"
     ),
     browser: bool = typer.Option(False, "--browser", "-b", help="Use OAuth browser flow (Claude)"),
+    import_codex: bool = typer.Option(
+        False, "--import-codex", help="Import tokens from Codex CLI (ChatGPT)"
+    ),
     import_cli: bool = typer.Option(
         False, "--import-cli", help="Import credentials from existing CLI tools"
     ),
@@ -240,6 +243,19 @@ def accounts_login(
 
     if not account:
         console.print(f"[red]Account not found: {account_id}[/red]")
+        return
+
+    if import_codex:
+        if account.provider != Provider.CHATGPT:
+            console.print("[red]Codex import only supported for ChatGPT[/red]")
+            return
+
+        console.print("[dim]Importing tokens from Codex CLI...[/dim]")
+        try:
+            result = asyncio.run(manager.login_chatgpt_codex_import(account_id))
+            console.print(f"[green]Logged in via Codex: {result.display_name}[/green]")
+        except Exception as e:
+            console.print(f"[red]Codex import failed: {e}[/red]")
         return
 
     if import_cli:
@@ -256,11 +272,12 @@ def accounts_login(
             return
 
     if browser:
-        if account.provider != Provider.CLAUDE:
-            console.print("[red]Browser OAuth only supported for Claude[/red]")
+        if account.provider not in (Provider.CLAUDE, Provider.CHATGPT):
+            console.print("[red]Browser OAuth supported for Claude and ChatGPT[/red]")
             return
 
-        console.print("[dim]Opening browser for Claude OAuth login...[/dim]")
+        provider_name = account.provider.value.title()
+        console.print(f"[dim]Opening browser for {provider_name} OAuth login...[/dim]")
 
         def on_url(url: str):
             console.print(
@@ -269,15 +286,18 @@ def accounts_login(
             console.print("[dim]Waiting for authorization...[/dim]")
 
         try:
-            result = asyncio.run(manager.login_claude_browser(account_id, on_url=on_url))
+            if account.provider == Provider.CLAUDE:
+                result = asyncio.run(manager.login_claude_browser(account_id, on_url=on_url))
+            else:
+                result = asyncio.run(manager.login_chatgpt_browser(account_id, on_url=on_url))
             console.print(f"[green]Logged in: {result.display_name}[/green]")
         except Exception as e:
             console.print(f"[red]Browser login failed: {e}[/red]")
         return
 
     if device_flow:
-        if account.provider != Provider.COPILOT:
-            console.print("[red]Device flow only supported for Copilot[/red]")
+        if account.provider not in (Provider.COPILOT, Provider.CHATGPT):
+            console.print("[red]Device flow supported for Copilot and ChatGPT[/red]")
             return
 
         def on_code(uri: str, code: str):
@@ -286,9 +306,14 @@ def accounts_login(
             console.print("[dim]Waiting for authorization...[/dim]")
 
         try:
-            result = asyncio.run(
-                manager.login_copilot_device_flow(account_id, on_user_code=on_code)
-            )
+            if account.provider == Provider.COPILOT:
+                result = asyncio.run(
+                    manager.login_copilot_device_flow(account_id, on_user_code=on_code)
+                )
+            else:
+                result = asyncio.run(
+                    manager.login_chatgpt_device_flow(account_id, on_user_code=on_code)
+                )
             console.print(f"[green]Logged in: {result.display_name}[/green]")
         except Exception as e:
             console.print(f"[red]Device flow failed: {e}[/red]")
@@ -309,6 +334,14 @@ def accounts_login(
     if account.provider == Provider.CLAUDE:
         console.print(
             "For Claude, use [bold]--browser[/bold] for OAuth or provide a [bold]--token[/bold]"
+        )
+        console.print(f"  ai-usage accounts login {account_id} --browser")
+        return
+
+    if account.provider == Provider.CHATGPT:
+        console.print(
+            "For ChatGPT, use [bold]--browser[/bold] for OAuth (recommended), "
+            "[bold]--device-flow[/bold], or [bold]--import-codex[/bold]"
         )
         console.print(f"  ai-usage accounts login {account_id} --browser")
         return

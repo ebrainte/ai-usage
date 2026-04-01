@@ -188,6 +188,63 @@ class AccountManager:
         self.storage.save_account(account)
         return account
 
+    async def login_chatgpt_browser(
+        self,
+        account_id: str,
+        on_url: callable | None = None,
+    ) -> Account:
+        """Login a ChatGPT account via OpenAI OAuth PKCE browser flow."""
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"Account '{account_id}' not found")
+
+        if account.provider != Provider.CHATGPT:
+            raise ValueError("Browser OAuth login only supported for ChatGPT")
+
+        auth = self._auth_handlers[Provider.CHATGPT]
+        credential = await auth.authenticate_with_browser(account, on_url=on_url)
+
+        account.credential = credential
+        account.status = AccountStatus.ACTIVE
+        self.storage.save_account(account)
+        return account
+
+    async def login_chatgpt_device_flow(
+        self, account_id: str, on_user_code: callable | None = None
+    ) -> Account:
+        """Login a ChatGPT account via OpenAI device code flow."""
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"Account '{account_id}' not found")
+
+        if account.provider != Provider.CHATGPT:
+            raise ValueError("Device flow login only supported for ChatGPT")
+
+        auth = self._auth_handlers[Provider.CHATGPT]
+        credential = await auth.authenticate_with_device_flow(account, on_user_code=on_user_code)
+
+        account.credential = credential
+        account.status = AccountStatus.ACTIVE
+        self.storage.save_account(account)
+        return account
+
+    async def login_chatgpt_codex_import(self, account_id: str) -> Account:
+        """Login a ChatGPT account by importing tokens from Codex CLI."""
+        account = self.get_account(account_id)
+        if not account:
+            raise ValueError(f"Account '{account_id}' not found")
+
+        if account.provider != Provider.CHATGPT:
+            raise ValueError("Codex import only supported for ChatGPT")
+
+        auth = self._auth_handlers[Provider.CHATGPT]
+        credential = await auth.authenticate_from_codex(account)
+
+        account.credential = credential
+        account.status = AccountStatus.ACTIVE
+        self.storage.save_account(account)
+        return account
+
     async def validate_all(self) -> dict[str, bool]:
         """Validate credentials for all accounts.
 

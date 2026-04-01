@@ -21,7 +21,7 @@ Track your AI subscription usage across **Claude**, **ChatGPT**, and **GitHub Co
 - **Live dashboard** — Auto-refreshing TUI with progress bars and color-coded usage
 - **CLI mode** — One-shot `ai-usage check` for quick status in your terminal
 - **Secure credentials** — Tokens stored in macOS Keychain via `keyring`, never in plain files
-- **Provider-specific login UX** — OAuth browser flow (Claude), GitHub device flow (Copilot), session token (ChatGPT)
+- **Provider-specific login UX** — OAuth browser flow (Claude, ChatGPT), device flow (Copilot, ChatGPT), Codex CLI import, manual tokens
 
 ## Supported Providers
 
@@ -29,11 +29,17 @@ Track your AI subscription usage across **Claude**, **ChatGPT**, and **GitHub Co
 |----------|-------------|------------|
 | **Claude** | OAuth browser flow, token import | Session & weekly limits, extra usage credits |
 | **GitHub Copilot** | Device flow, PAT, CLI import | Completions, chat, premium interactions |
-| **ChatGPT** | Session token | Skeleton (WIP) |
+| **ChatGPT** | OAuth browser flow, device flow, Codex CLI import | 5-hour & weekly rate limits, credits |
 
 ## Install
 
-### With pipx (recommended)
+### Homebrew (recommended)
+
+```bash
+brew install ebrainte/tap/ai-usage
+```
+
+### With pipx
 
 ```bash
 pipx install .
@@ -96,8 +102,10 @@ ai-usage check -p claude    # Filter by provider
 ai-usage accounts list                                          # List all accounts
 ai-usage accounts add --provider claude --label "Work"          # Add account
 ai-usage accounts add --provider copilot --label "Personal"     # Add Copilot account
-ai-usage accounts login <account-id> --browser                  # Claude OAuth (browser)
-ai-usage accounts login <account-id> --device-flow              # Copilot device flow
+ai-usage accounts add --provider chatgpt --label "Personal"     # Add ChatGPT account
+ai-usage accounts login <account-id> --browser                  # Claude/ChatGPT OAuth (browser)
+ai-usage accounts login <account-id> --device-flow              # Copilot/ChatGPT device flow
+ai-usage accounts login <account-id> --import-codex             # ChatGPT import from Codex CLI
 ai-usage accounts login <account-id> --token "gho_..."          # Manual token
 ai-usage accounts remove <account-id>                           # Remove account
 ai-usage accounts validate                                      # Check all credentials
@@ -120,7 +128,7 @@ src/ai_usage/
   adapters/        # Implementations
     claude/        # OAuth PKCE + usage fetcher
     copilot/       # Device flow + internal GitHub API
-    chatgpt/       # Session token (skeleton)
+    chatgpt/       # OAuth PKCE + device flow + wham/usage API
     storage/       # YAML config + macOS Keychain (keyring)
   app/             # Application services
     account_manager.py   # Account CRUD + login orchestration

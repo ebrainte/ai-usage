@@ -221,6 +221,7 @@ class AccountsScreen(Screen):
                 Horizontal(
                     Button("Browser OAuth", id="browser-oauth-login", variant="success"),
                     Button("Device Flow", id="device-flow-login", variant="success"),
+                    Button("Import from Codex", id="codex-import-login", variant="default"),
                     id="login-action-buttons",
                 ),
                 Horizontal(
@@ -285,6 +286,9 @@ class AccountsScreen(Screen):
         elif btn_id == "device-flow-login":
             self._show_message("[dim]Starting Device Flow...[/dim]")
             self._handle_device_flow()
+        elif btn_id == "codex-import-login":
+            self._show_message("[dim]Importing from Codex CLI...[/dim]")
+            self._handle_codex_import()
         else:
             logger.warning("Unhandled button: %r", btn_id)
 
@@ -371,6 +375,7 @@ class AccountsScreen(Screen):
         submit_btn = self.query_one("#submit-login", Button)
         browser_btn = self.query_one("#browser-oauth-login", Button)
         device_btn = self.query_one("#device-flow-login", Button)
+        codex_btn = self.query_one("#codex-import-login", Button)
         action_row = self.query_one("#login-action-buttons", Horizontal)
         token_row = self.query_one("#login-token-row", Horizontal)
 
@@ -379,6 +384,7 @@ class AccountsScreen(Screen):
         submit_btn.display = False
         browser_btn.display = False
         device_btn.display = False
+        codex_btn.display = False
         action_row.display = False
         token_row.display = False
 
@@ -390,6 +396,7 @@ class AccountsScreen(Screen):
             )
             action_row.display = True
             browser_btn.display = True
+            browser_btn.label = "Browser OAuth"
 
         elif account and account.provider == Provider.COPILOT:
             instructions_label.update(
@@ -408,15 +415,19 @@ class AccountsScreen(Screen):
         elif account and account.provider == Provider.CHATGPT:
             instructions_label.update(
                 f"[bold]Login: {account.label}[/bold] (ChatGPT)\n"
-                "ChatGPT requires a session token from your browser:\n"
-                "1. Go to [bold]chatgpt.com[/bold] and log in\n"
-                "2. Open DevTools (F12) → Application → Cookies\n"
-                "3. Copy the [bold]__Secure-next-auth.session-token[/bold] value\n"
-                "4. Paste it below"
+                "Click [bold]Browser OAuth[/bold] to login via OpenAI (recommended).\n"
+                "[bold]Device Flow[/bold] for headless/SSH. "
+                "[bold]Import from Codex[/bold] if you have Codex CLI tokens.\n"
+                "Or paste a session token below as last resort."
             )
+            action_row.display = True
+            browser_btn.display = True
+            browser_btn.label = "Browser OAuth"
+            device_btn.display = True
+            codex_btn.display = True
             token_row.display = True
             token_input.display = True
-            token_input.placeholder = "Session token from chatgpt.com cookies"
+            token_input.placeholder = "Session token (fallback)"
             submit_btn.display = True
 
         else:
@@ -470,26 +481,36 @@ class AccountsScreen(Screen):
 
     @work(exclusive=True, group="auth", thread=False)
     async def _handle_browser_oauth(self) -> None:
-        """Start OAuth browser flow for Claude."""
+        """Start OAuth browser flow for Claude or ChatGPT."""
         if not self._login_target:
             self._show_message("[red]No account selected — click Login first[/red]")
             return
 
         account = self.account_manager.get_account(self._login_target)
-        if not account or account.provider != Provider.CLAUDE:
-            self._show_message("[red]Browser OAuth only works for Claude accounts[/red]")
+        if not account or account.provider not in (Provider.CLAUDE, Provider.CHATGPT):
+            self._show_message(
+                "[red]Browser OAuth only works for Claude and ChatGPT accounts[/red]"
+            )
             return
 
-        self._show_message("Opening browser for Claude OAuth login...")
+        provider_name = account.provider.value.title()
+        self._show_message(f"Opening browser for {provider_name} OAuth login...")
 
         def on_url(url: str):
             self._show_message(
                 f"Waiting for browser authorization... [dim](URL: {url[:60]}...)[/dim]"
             )
-            self.notify("Waiting for browser authorization...", title="Claude OAuth", timeout=120)
+            self.notify(
+                "Waiting for browser authorization...",
+                title=f"{provider_name} OAuth",
+                timeout=120,
+            )
 
         try:
-            await self.account_manager.login_claude_browser(self._login_target, on_url=on_url)
+            if account.provider == Provider.CLAUDE:
+                await self.account_manager.login_claude_browser(self._login_target, on_url=on_url)
+            else:
+                await self.account_manager.login_chatgpt_browser(self._login_target, on_url=on_url)
             self._show_message(f"[green]Logged in: {self._login_target}[/green]")
             self._refresh_list()
         except Exception as e:
@@ -497,42 +518,68 @@ class AccountsScreen(Screen):
 
     @work(exclusive=True, group="auth", thread=False)
     async def _handle_device_flow(self) -> None:
-        """Start GitHub device flow for Copilot."""
+        """Start device flow for Copilot or ChatGPT."""
         logger.info("_handle_device_flow ENTERED, login_target=%r", self._login_target)
         if not self._login_target:
             self._show_message("[red]No account selected — click Login first[/red]")
             return
 
         account = self.account_manager.get_account(self._login_target)
-        if not account or account.provider != Provider.COPILOT:
-            self._show_message("[red]Device flow only works for Copilot accounts[/red]")
+        if not account or account.provider not in (Provider.COPILOT, Provider.CHATGPT):
+            self._show_message("[red]Device flow only works for Copilot and ChatGPT accounts[/red]")
             return
 
-        self._show_message("Starting GitHub device flow...")
+        provider_name = account.provider.value.title()
+        self._show_message(f"Starting {provider_name} device flow...")
 
         def on_code(uri: str, code: str):
             self._show_message(
                 f"Go to [bold link={uri}]{uri}[/bold link] and enter code: [bold]{code}[/bold]"
             )
-            # Also show as a notification since the label might be off-screen
             self.notify(
                 f"Enter code [bold]{code}[/bold] at {uri}",
-                title="GitHub Device Flow",
+                title=f"{provider_name} Device Flow",
                 timeout=120,
             )
-            # Open the verification URL in browser
             import webbrowser
 
             webbrowser.open(uri)
 
         try:
-            await self.account_manager.login_copilot_device_flow(
-                self._login_target, on_user_code=on_code
-            )
+            if account.provider == Provider.COPILOT:
+                await self.account_manager.login_copilot_device_flow(
+                    self._login_target, on_user_code=on_code
+                )
+            else:
+                await self.account_manager.login_chatgpt_device_flow(
+                    self._login_target, on_user_code=on_code
+                )
             self._show_message(f"[green]Logged in: {self._login_target}[/green]")
             self._refresh_list()
         except Exception as e:
             self._show_message(f"[red]Device flow failed: {e}[/red]")
+
+    @work(exclusive=True, group="auth", thread=False)
+    async def _handle_codex_import(self) -> None:
+        """Import ChatGPT credentials from Codex CLI."""
+        if not self._login_target:
+            self._show_message("[red]No account selected — click Login first[/red]")
+            return
+
+        account = self.account_manager.get_account(self._login_target)
+        if not account or account.provider != Provider.CHATGPT:
+            self._show_message("[red]Codex import only works for ChatGPT accounts[/red]")
+            return
+
+        self._show_message("Importing tokens from Codex CLI...")
+
+        try:
+            await self.account_manager.login_chatgpt_codex_import(self._login_target)
+            self._show_message(f"[green]Logged in: {self._login_target}[/green]")
+            self.notify("ChatGPT authenticated via Codex CLI", title="Success", timeout=5)
+            self._refresh_list()
+        except Exception as e:
+            self._show_message(f"[red]Codex import failed: {e}[/red]")
 
     def _show_message(self, text: str) -> None:
         """Show a message in the status area."""

@@ -1,16 +1,16 @@
 """ChatGPT usage data fetcher.
 
-Uses ChatGPT internal APIs (same as web dashboard):
-- /backend-api/me — account info
-- /backend-api/accounts/check/v4-2023-04-27 — plan + usage info
+Uses ChatGPT's internal wham/usage API (same endpoint as CodexBar):
+- GET /backend-api/wham/usage — rate limits, plan type, credits
 
-Note: These are undocumented internal APIs. They may change without notice.
+Supports both OAuth tokens (from Codex import) and session tokens.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 
@@ -18,7 +18,6 @@ from ai_usage.adapters.storage.file import get_secret
 from ai_usage.domain.exceptions import AuthenticationError
 from ai_usage.domain.models import (
     Account,
-    AuthMethod,
     Provider,
     Quota,
     UsageData,
@@ -28,9 +27,21 @@ logger = logging.getLogger(__name__)
 
 CHATGPT_BASE = "https://chatgpt.com"
 
+# Known plan types from OpenAI
+PLAN_DISPLAY_NAMES = {
+    "free": "ChatGPT Free",
+    "go": "ChatGPT Go",
+    "plus": "ChatGPT Plus",
+    "pro": "ChatGPT Pro",
+    "team": "ChatGPT Team",
+    "business": "ChatGPT Business",
+    "enterprise": "ChatGPT Enterprise",
+    "education": "ChatGPT Education",
+}
+
 
 class ChatGPTUsage:
-    """Fetches ChatGPT usage data."""
+    """Fetches ChatGPT usage data via wham/usage API."""
 
     def supports_provider(self) -> str:
         return Provider.CHATGPT
@@ -44,36 +55,48 @@ class ChatGPTUsage:
                 error="No credentials configured",
             )
 
-        token = get_secret(account.credential.keyring_key)
-        if not token:
+        secret = get_secret(account.credential.keyring_key)
+        if not secret:
             return UsageData(
                 account_id=account.id,
                 provider=Provider.CHATGPT,
                 error="Credentials not found in keyring",
             )
 
+        # Parse token — could be JSON (OAuth) or plain string (session token)
+        access_token, openai_account_id = self._extract_token(secret)
+
         headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
-            "User-Agent": "ai-usage/0.1.0",
+            "User-Agent": "ai-usage",
+            "Accept": "application/json",
         }
+        if openai_account_id:
+            headers["ChatGPT-Account-Id"] = openai_account_id
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                # Step 1: Get user info
-                user_info = await self._fetch_me(client, headers)
-
-                # Step 2: Get account/plan details
-                account_info = await self._fetch_account_check(client, headers)
-
-                return self._build_usage_data(
-                    account_id=account.id,
-                    user_info=user_info,
-                    account_info=account_info,
+                resp = await client.get(
+                    f"{CHATGPT_BASE}/backend-api/wham/usage",
+                    headers=headers,
                 )
 
-        except AuthenticationError:
-            raise
+                if resp.status_code in (401, 403):
+                    return UsageData(
+                        account_id=account.id,
+                        provider=Provider.CHATGPT,
+                        error="Session expired — re-import from Codex or provide new token",
+                    )
+
+                resp.raise_for_status()
+                data = resp.json()
+                logger.debug(
+                    "wham/usage response for %s: %s", account.label, json.dumps(data, indent=2)
+                )
+
+                return self._parse_wham_usage(account.id, data)
+
         except httpx.HTTPError as e:
             logger.exception("Failed to fetch ChatGPT usage for %s", account.label)
             return UsageData(
@@ -82,84 +105,124 @@ class ChatGPTUsage:
                 error=f"HTTP error: {e}",
             )
 
-    async def _fetch_me(self, client: httpx.AsyncClient, headers: dict) -> dict:
-        """Fetch user profile."""
+    def _extract_token(self, secret: str) -> tuple[str, str | None]:
+        """Extract access token and optional account ID from stored secret."""
         try:
-            resp = await client.get(
-                f"{CHATGPT_BASE}/backend-api/me",
-                headers=headers,
-            )
-            if resp.status_code in (401, 403):
-                raise AuthenticationError(provider="chatgpt", message="Session expired or invalid")
-            resp.raise_for_status()
-            data = resp.json()
-            return {
-                "email": data.get("email"),
-                "name": data.get("name"),
-                "raw": data,
+            data = json.loads(secret)
+            return data.get("access_token", secret), data.get("account_id")
+        except (json.JSONDecodeError, TypeError):
+            return secret, None
+
+    def _parse_wham_usage(self, account_id: str, data: dict) -> UsageData:
+        """Parse the wham/usage response into UsageData.
+
+        Response format (from CodexBar analysis):
+        {
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 42,
+                    "reset_at": 1743523200,
+                    "limit_window_seconds": 18000
+                },
+                "secondary_window": {
+                    "used_percent": 10,
+                    "reset_at": 1743782400,
+                    "limit_window_seconds": 604800
+                }
+            },
+            "credits": {
+                "has_credits": true,
+                "unlimited": false,
+                "balance": 123.45
             }
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code in (401, 403):
-                raise AuthenticationError(provider="chatgpt", message="Session expired or invalid")
-            return {}
-
-    async def _fetch_account_check(self, client: httpx.AsyncClient, headers: dict) -> dict:
-        """Fetch account/plan/usage info."""
-        try:
-            resp = await client.get(
-                f"{CHATGPT_BASE}/backend-api/accounts/check/v4-2023-04-27",
-                headers=headers,
-            )
-            if resp.status_code == 200:
-                return resp.json()
-        except httpx.HTTPError as e:
-            logger.warning("Failed to fetch account check: %s", e)
-        return {}
-
-    def _build_usage_data(
-        self,
-        account_id: str,
-        user_info: dict,
-        account_info: dict,
-    ) -> UsageData:
-        """Build structured UsageData from raw API responses."""
+        }
+        """
         quotas: list[Quota] = []
-        plan_name = None
 
-        # Parse account info
-        if account_info:
-            accounts = account_info.get("accounts", {})
-            if accounts:
-                # Usually one account entry
-                for acct_id, acct_data in accounts.items():
-                    entitlements = acct_data.get("entitlement", {})
-                    plan = entitlements.get("subscription_plan")
-                    if plan:
-                        plan_name = plan
+        # Plan type
+        plan_type = data.get("plan_type", "unknown")
+        plan_name = PLAN_DISPLAY_NAMES.get(plan_type, f"ChatGPT {plan_type.title()}")
 
-                    # Rate limits from entitlements
-                    rate_limits = acct_data.get("rate_limits", [])
-                    for rl in rate_limits:
-                        limit = rl.get("limit")
-                        remaining = rl.get("remaining")
-                        window = rl.get("window")
+        # Rate limits
+        rate_limit = data.get("rate_limit", {})
 
-                        quotas.append(
-                            Quota(
-                                name=f"rate_{window}" if window else "rate_limit",
-                                limit=float(limit) if limit else None,
-                                remaining=float(remaining) if remaining is not None else None,
-                                unit="messages",
-                            )
-                        )
+        primary = rate_limit.get("primary_window")
+        if primary:
+            used_pct = primary.get("used_percent", 0)
+            reset_at = primary.get("reset_at")
+            window_secs = primary.get("limit_window_seconds", 18000)
 
-        if not plan_name:
-            plan_name = "ChatGPT"
+            reset_dt = None
+            if reset_at:
+                try:
+                    reset_dt = datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                except (ValueError, OSError):
+                    pass
+
+            # Window label: 18000s = 5h, etc.
+            window_hours = window_secs // 3600
+            window_label = f"{window_hours}-Hour" if window_hours else f"{window_secs}s"
+
+            quotas.append(
+                Quota(
+                    name=window_label,
+                    limit=100.0,
+                    used=float(used_pct),
+                    unit="percent",
+                    reset_at=reset_dt,
+                )
+            )
+
+        secondary = rate_limit.get("secondary_window")
+        if secondary:
+            used_pct = secondary.get("used_percent", 0)
+            reset_at = secondary.get("reset_at")
+            window_secs = secondary.get("limit_window_seconds", 604800)
+
+            reset_dt = None
+            if reset_at:
+                try:
+                    reset_dt = datetime.fromtimestamp(reset_at, tz=timezone.utc)
+                except (ValueError, OSError):
+                    pass
+
+            window_days = window_secs // 86400
+            window_label = f"{window_days}-Day" if window_days else "Weekly"
+
+            quotas.append(
+                Quota(
+                    name=window_label,
+                    limit=100.0,
+                    used=float(used_pct),
+                    unit="percent",
+                    reset_at=reset_dt,
+                )
+            )
+
+        # Credits
+        credits = data.get("credits", {})
+        if credits.get("has_credits") and not credits.get("unlimited"):
+            balance = credits.get("balance", 0)
+            # Balance can be a string or number (CodexBar handles both)
+            if isinstance(balance, str):
+                try:
+                    balance = float(balance)
+                except ValueError:
+                    balance = 0.0
+            quotas.append(
+                Quota(
+                    name="Credits",
+                    used=0.0,
+                    remaining=float(balance),
+                    unit="credits",
+                )
+            )
 
         return UsageData(
             account_id=account_id,
             provider=Provider.CHATGPT,
             plan_name=plan_name,
             quotas=quotas,
-            raw_data={"user": user_info, "account": account_info},
+            raw_data=data,
         )
