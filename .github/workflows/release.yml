@@ -1,0 +1,55 @@
+name: Release & Update Homebrew
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
+
+      - name: Compute tarball SHA256
+        id: sha
+        run: |
+          TAG="${{ github.ref_name }}"
+          URL="https://github.com/ebrainte/ai-usage/archive/refs/tags/${TAG}.tar.gz"
+          curl -sL "$URL" -o source.tar.gz
+          SHA=$(sha256sum source.tar.gz | cut -d ' ' -f 1)
+          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "Tarball SHA256: ${SHA}"
+
+      - name: Update Homebrew formula
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/ebrainte/homebrew-tap.git" tap
+          cd tap
+
+          # Update version, URL, and SHA in the formula
+          sed -i "s|url \".*\"|url \"https://github.com/ebrainte/ai-usage/archive/refs/tags/${TAG}.tar.gz\"|" Formula/ai-usage.rb
+          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/ai-usage.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ai-usage.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "chore: update ai-usage to ${VERSION}"
+          git push
