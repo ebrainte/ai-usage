@@ -9,28 +9,64 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            artifact: ai-usage-darwin-arm64
+          - os: macos-13
+            arch: x86_64
+            artifact: ai-usage-darwin-x86_64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build binary
+        run: uv run pyinstaller ai-usage.spec --clean
+
+      - name: Rename binary
+        run: mv dist/ai-usage dist/${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
-            --generate-notes
+            --generate-notes \
+            artifacts/ai-usage-darwin-arm64/ai-usage-darwin-arm64 \
+            artifacts/ai-usage-darwin-x86_64/ai-usage-darwin-x86_64
 
-      - name: Compute tarball SHA256
+      - name: Compute SHA256 for binaries
         id: sha
         run: |
-          TAG="${{ github.ref_name }}"
-          URL="https://github.com/ebrainte/ai-usage/archive/refs/tags/${TAG}.tar.gz"
-          curl -sL "$URL" -o source.tar.gz
-          SHA=$(sha256sum source.tar.gz | cut -d ' ' -f 1)
-          echo "sha256=${SHA}" >> "$GITHUB_OUTPUT"
-          echo "Tarball SHA256: ${SHA}"
+          SHA_ARM64=$(sha256sum artifacts/ai-usage-darwin-arm64/ai-usage-darwin-arm64 | cut -d ' ' -f 1)
+          SHA_X86=$(sha256sum artifacts/ai-usage-darwin-x86_64/ai-usage-darwin-x86_64 | cut -d ' ' -f 1)
+          echo "sha256_arm64=${SHA_ARM64}" >> "$GITHUB_OUTPUT"
+          echo "sha256_x86_64=${SHA_X86}" >> "$GITHUB_OUTPUT"
+          echo "ARM64 SHA256: ${SHA_ARM64}"
+          echo "x86_64 SHA256: ${SHA_X86}"
 
       - name: Update Homebrew formula
         env:
@@ -38,14 +74,43 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          SHA="${{ steps.sha.outputs.sha256 }}"
+          SHA_ARM64="${{ steps.sha.outputs.sha256_arm64 }}"
+          SHA_X86="${{ steps.sha.outputs.sha256_x86_64 }}"
+          BASE_URL="https://github.com/ebrainte/ai-usage/releases/download/${TAG}"
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/ebrainte/homebrew-tap.git" tap
           cd tap
 
-          # Update version, URL, and SHA in the formula
-          sed -i "s|url \".*\"|url \"https://github.com/ebrainte/ai-usage/archive/refs/tags/${TAG}.tar.gz\"|" Formula/ai-usage.rb
-          sed -i "s|sha256 \".*\"|sha256 \"${SHA}\"|" Formula/ai-usage.rb
+          cat > Formula/ai-usage.rb << EOF
+          class AiUsage < Formula
+            desc "Track AI subscription usage across Claude, ChatGPT, and GitHub Copilot"
+            homepage "https://github.com/ebrainte/ai-usage"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE_URL}/ai-usage-darwin-arm64"
+                sha256 "${SHA_ARM64}"
+              end
+              on_intel do
+                url "${BASE_URL}/ai-usage-darwin-x86_64"
+                sha256 "${SHA_X86}"
+              end
+            end
+
+            def install
+              bin.install Dir["ai-usage-darwin-*"].first => "ai-usage"
+            end
+
+            test do
+              assert_match "usage", shell_output("#{bin}/ai-usage --help")
+            end
+          end
+          EOF
+
+          # Remove leading whitespace from heredoc
+          sed -i 's/^          //' Formula/ai-usage.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
