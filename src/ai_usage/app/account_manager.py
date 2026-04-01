@@ -49,8 +49,14 @@ class AccountManager:
     ) -> Account:
         """Add a new account (without credentials — login separately)."""
         if not account_id:
-            # Generate ID from provider + label
-            account_id = f"{provider.value}-{label.lower().replace(' ', '-')}"
+            # Generate ID from provider + label, sanitized for use as widget IDs
+            import re
+
+            slug = label.lower()
+            slug = slug.replace("@", "-at-").replace(".", "-")
+            slug = re.sub(r"[^a-z0-9-]", "-", slug)
+            slug = re.sub(r"-+", "-", slug).strip("-")
+            account_id = f"{provider.value}-{slug}"
 
         # Check for duplicate ID
         existing = self.get_account(account_id)
