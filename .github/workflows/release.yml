@@ -16,9 +16,6 @@ jobs:
           - os: macos-15
             arch: arm64
             artifact: ai-usage-darwin-arm64
-          - os: macos-13
-            arch: x86_64
-            artifact: ai-usage-darwin-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -55,18 +52,14 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            artifacts/ai-usage-darwin-arm64/ai-usage-darwin-arm64 \
-            artifacts/ai-usage-darwin-x86_64/ai-usage-darwin-x86_64
+            artifacts/ai-usage-darwin-arm64/ai-usage-darwin-arm64
 
-      - name: Compute SHA256 for binaries
+      - name: Compute SHA256
         id: sha
         run: |
           SHA_ARM64=$(sha256sum artifacts/ai-usage-darwin-arm64/ai-usage-darwin-arm64 | cut -d ' ' -f 1)
-          SHA_X86=$(sha256sum artifacts/ai-usage-darwin-x86_64/ai-usage-darwin-x86_64 | cut -d ' ' -f 1)
           echo "sha256_arm64=${SHA_ARM64}" >> "$GITHUB_OUTPUT"
-          echo "sha256_x86_64=${SHA_X86}" >> "$GITHUB_OUTPUT"
           echo "ARM64 SHA256: ${SHA_ARM64}"
-          echo "x86_64 SHA256: ${SHA_X86}"
 
       - name: Update Homebrew formula
         env:
@@ -75,7 +68,6 @@ jobs:
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
           SHA_ARM64="${{ steps.sha.outputs.sha256_arm64 }}"
-          SHA_X86="${{ steps.sha.outputs.sha256_x86_64 }}"
           BASE_URL="https://github.com/ebrainte/ai-usage/releases/download/${TAG}"
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/ebrainte/homebrew-tap.git" tap
@@ -92,10 +84,6 @@ jobs:
               on_arm do
                 url "${BASE_URL}/ai-usage-darwin-arm64"
                 sha256 "${SHA_ARM64}"
-              end
-              on_intel do
-                url "${BASE_URL}/ai-usage-darwin-x86_64"
-                sha256 "${SHA_X86}"
               end
             end
 
